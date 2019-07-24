@@ -1,19 +1,25 @@
 /*
-	< ZIZORZ > (Heritage: ScreenCapture (Sean), ScreenClipping (Learning One), ScreenClipping (Sumon), ScreenClipper (Sumon), Zizor (Sumon), Zizorz (Sumon) - due to correct grammar & SEO
+	< ZIZORZ > (Heritage: ScreenCapture (Sean), ScreenClipping (Learning One), ScreenClipping (Sumon), ScreenClipper (Sumon), Zizorz (Sumon) 
     
       Script Function:
       Copy, save or upload a part of the screen as an image.  
+*/
     
-	Version: 0.94 
-	Author: Simon StrÃ¥lberg [sumon @ Autohotkey forums, simon . stralberg @ gmail . com]
+ScriptVersion := "1.4"
+
+/*
+	Author: Simon Strålberg [sumon @ Autohotkey forums]
     Based on: Learning one's ScreenClipping with inspiration from Zonanic, Sean & more...  [History: http://www.autohotkey.com/forum/viewtopic.php?t=49950]
-	Autohotkey version: AHK_L (ANSI!) <--- Due to the image function
+	Autohotkey version: AHK_L
 	Dependencies:
 		- Notify.ahk by gwarble & more [http://www.autohotkey.com/forum/viewtopic.php?t=48668]
         - httpQuery [http://www.autohotkey.com/forum/topic33506.html]
 		
 	CHANGELOG:
 	v.
+        - v1.4 Fixed imgur uploads. 
+        - v1.3 Changed Notify GUI style
+        - v1.2 Uploads to http://imgur.com, oAuth support, improved DragBox(), default directory changed, full file name is returned, GDIP, code cleanup
         - v 0.94(b) Added notification disable/enable
         - v 0.94 (20110409) Added Settings & Help (NICE GUI), cleaned up some unneeded functions, renamed to Zizorz, added Winkey support, changed hotkeys (Leftclick again)
 		- v 0.9 (20110407) Added version numbers, removed httpQuery (added requirement)
@@ -22,20 +28,26 @@
 	
 	TODO:
 
-	LICENSE: If no license documentation exists, [http://www.autohotkey.net/~sumon/license.html]
+	LICENSE: If no license documentation exists, [http://appifyer.com/ahk/license.html]
 	Script created using Autohotkey [http://www.autohotkey.com]
 	
 */
 
+; ======== INITIATION ========
 
-#SingleInstance force
+#Include <GDIP>
 SetBatchLines, 10ms
+#SingleInstance force
 SetWorkingDir %A_ScriptDir%  ; Ensures a consistent starting directory.
-; A full imagelistcheck
-IncludeImages := "exit.ico|feedback.ico|filedir.ico|help.ico|notification.ico|save.ico|settings.ico|shortcut.ico|zizorz.ico|zizorz_header.jpg|zizorz2 bg.png"
+
+pToken := gdip_startup()
+If !pToken
+   throw Exception("Gdip could not start up.")
+
+IncludeImages := "exit.ico|feedback.ico|filedir.ico|key.ico|help.ico|notification.ico|save.ico|settings.ico|shortcut.ico|zizorz.ico|zizorz_header.jpg"
 Loop, Parse, IncludeImages, |
 {
-   If (!FileExist("data\img\" . A_LoopField))
+   If (!FileExist("data\img\" A_LoopField))
    {
       Gosub, Install
       break
@@ -44,15 +56,25 @@ Loop, Parse, IncludeImages, |
 
 IniRead, ImgFolder, data\ZizorzSettings.ini, Folder, Path, PrintScreens
 IniRead, Notification, data\ZizorzSettings.ini, Notification, Enabled, 1
+
 If (!ImgFolder)
-   ImgFolder := A_ScriptDir . "\data\PrintScreens"
+{
+   RegRead, MyPictures, HKEY_CURRENT_USER, Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders, My Pictures ; looks for Pictures folderlocation
+   ImgFolder := MyPictures ? MyPictures "\Screenshots" : "data\PrintScreens"
+}
+
 IfNotExist, %ImgFolder%
    FileCreateDir, %ImgFolder%
+
+SetSystemCursor("IDC_Cross") ; To show that you can click-drag, and give better precision
+
+; ======== LAUNCH ========
+
 Menu, Tray, Icon, data\img\Zizorz.ico
 Menu, Tray, NoStandard
 Menu, Tray, Tip, Zizorz`nRight-click to open menu
 Menu, Tray, Add, Settings
-   Menu, Tray, Icon, Settings, data\img\filedir.ico,, 32
+   Menu, Tray, Icon, Settings, data\img\settings.ico,, 32
 Menu, Tray, Add, Help, GuiHelp
    Menu, Tray, Icon, Help, data\img\help.ico,, 32
 Menu, Tray, Add, Feedback
@@ -60,253 +82,198 @@ Menu, Tray, Add, Feedback
 Menu, Tray, Add, Exit
    Menu, Tray, Icon, Exit, data\img\exit.ico,, 32
 If (Notification != 0)
-   NotifyID := Notify("Zizorz:", "Hold a modifier and drag to capture`n[+Shift] Upload`n[+Ctrl] Copy`n[+Alt] File`n[+Win]Capture window", 8,, "data\img\Zizorz.ico")  ; Old: Drag to capture an area (or)`nhold [Win] to capture target window`n[+Shift] Upload`n[+Ctrl] Copy`n[+Alt] File
-; ======== Hotkeys ========
+   NotifyID := Notify("Zizorz", "Capture image by dragging a box while holding:`n(Shift/Ctrl/Alt to Upload/Copy/Save)", 8,, "data\img\Zizorz.ico")
+
+; ======== HOTKEYS ========
 
 Hotkey, *+LButton, UploadClip ; Shift (Upload)
 Hotkey, *^LButton, CopyClip ; Ctrl (Clipboard)
-;~ Hotkey, #LButton, WinClip ; Win (Window) [ Winkey is held IN ADDITION TO another key ]
 Hotkey, *!LButton, SaveClip ; Alt (File)
 Hotkey, F1, Settings
-SetSystemCursor("IDC_Cross") ; To show that you can click-drag, and give better precision
-Sleep 8000
+Hotkey, F2, Settings
+
+Sleep 8000 ; Wait for reminder
 If (!ClipType)
-   Traytip, Zizorz:, Need help? Press F1 to access help & settings, 16, 1
+   Traytip, Zizorz:, Need help? Press f1 (or f2) to access help & settings, 16, 1
 return
 
 ~Esc:: Gosub, Exit
 return
-;=== Define type of clipping =========================================================================
+
+
+; ======== CLIPDRAG: Main Function ========
 
 SaveClip:
-ClipType := "Save"
-DragBoxColor := "EACD56"
-Gosub, ClipDrag
-return
-
 UploadClip:
-ClipType := "Upload"
-DragBoxColor := "6EB5C5"
-Gosub, ClipDrag
-return
-
 CopyClip:
-ClipType := "Copy"
-DragBoxColor := "78DF45"
-Gosub, ClipDrag
-return
-
-;=== Clipdrag, "Main function" =========================================================================
+ClipType := {SaveClip: "Save",   UploadClip: "Upload", CopyClip: "Copy"  }[A_ThisLabel] ; Meaning, if ClipDrag is called under a different label, use that label to define the ClipType Function
 
 ClipDrag:
-;~ SetTimer, NotifyOff, -100 : Doesn't really work all too well
+
 If (GetKeyState("LWin")) ; If LWin was also being held
 {   
-   ;~ Send !{PrintScreen} ; Capture current window to clipboard
+   ; Capture current window
    MouseGetPos,,, MouseWin
-   Wingetpos, MX, MY, W, H, ahk_id %MouseWin%
-   WinSet, AlwaysOnTop, Toggle, ahk_id %MouseWin%
-   MXEnd := MX + W
-   MYEnd := MY + H
-   Area = %MX%, %MY%, %MXend%, %MYend%
-   CaptureScreenLeft(Area)
-   WinSet, AlwaysOnTop, Toggle, ahk_id %MouseWin%
+   pbitmap := gdip_bitmapFromHWND(MouseWin)
    win_Flash(MouseWin, "b85bea")
    Gosub, ClipDragDone
    return
 }
-CoordMode, Mouse ,Screen
-MouseGetPos, MX, MY
-Gui, +AlwaysOnTop -caption +Border +ToolWindow +LastFound
-WinSet, Transparent, 80
-Gui, Color, %DragBoxColor%
-   
-While, (GetKeyState("LButton", "p"))
-{
-   MouseGetPos, MXend, MYend
-   Send {control up}
-   w := abs(MX - MXend)
-   h := abs(MY - MYend)
-   If ( MX < MXend )
-   X := MX
-   Else
-   X := MXend
-   If ( MY < MYend )
-   Y := MY
-   Else
-   Y := MYend
-   Gui, Show, x%X% y%Y% w%w% h%h%
-   Sleep, 10
-}
 
-; Disable all hotkeys
+db := DragBox() ; Hold mouse and drag to select area to capture
+
+; Disable all hotkeys when done
 Hotkey, *+LButton, Off ; Shift (Upload)
 Hotkey, *^LButton, Off ; Ctrl (Clipboard)
-;~ Hotkey, #LButton, Off ; Win (Window)
 Hotkey, *!LButton, Off ; Alt (File)
-RestoreCursors() ; Restore here too for more responsiveness
-
-
-MouseGetPos, MXend, MYend
-Gui, Destroy
-If ( MX > MXend )
-{
-   temp := MX
-   MX := MXend
-   MXend := temp
-}
-If ( MY > MYend )
-{
-   temp := MY
-   MY := MYend
-   MYend := temp
-}
-Area = %MX%, %MY%, %MXend%, %MYend%
-Sleep, 50   ; if omitted, GUI sometimes stays in picture [100]
-CaptureScreenLeft(Area)   ; Saves selected area without cursor in Clipboard.
-
-; <<<<<<<<<<<<<< This is where the three different cliptypes go different ways >>>>>>>>>
-ClipDragDone:
 RestoreCursors()
-SoundPlay, data\sounds\scissors.wav
-If (ClipType = "Copy")
-   ;~ Traytip, Zizorz:, Copied to clipboard, 3 ; Maybe a preview or something?
-   ;~ SoundPlay, data\sounds\drop.wav
-   Sleep 1 ; ?
-else
-   Gosub, ImageSave
+
+; ======== CAPTURE ========
+
+
+Area := db["X1"] "|" db["Y1"] "|" db["W"] "|" db["H"] ; _BitMapFromScreen(Area) does not accept an object as input
+If (db["Hotkey"])
+   ClipType := {Alt: "Save",   Shift: "Upload", Ctrl: "Copy" }[db["Hotkey"]]
+
+Sleep, 50 ; Allow GUI to disappear before capturing
+pBitmap := gdip_BitmapFromScreen(Area)
+If (pBitmap = -1)
+   throw Exception(Area " was passed incorrectly to gdip_BitmapFromScreen")
+
+ClipDragDone:
+If FileExist("data\sounds\scissors.wav")
+   SoundPlay, data\sounds\scissors.wav
+If (ClipType = "Copy") ; Copy
+{
+   Traytip, Zizorz:, Copied to clipboard, 3
+   gdip_SetBitmapToClipboard(pBitmap)
+}
+else ; (File or Upload)
+{
+    ; Find an available filename.
+   IfNotExist, %ImgFolder%
+      FileCreateDir, %ImgFolder%
+   start := 1
+   
+   FormatTime, CurrentDateTime,, yyyy-MM-dd
+   
+   If FileExist(NewFileName := imgfolder . "\Zizshot " CurrentDateTime . ".jpg")
+      While FileExist(NewFileName := imgfolder . "\Zizshot " CurrentDateTime . "(" start ").jpg")
+         start++
+
+   ; Capture screenshot
+   If (errorcode := gdip_SaveBitmapToFile(pBitmap, NewFileName, 100))
+   {
+      throw Exception(Errorcode " recieved when saving to file " NewFileName)
+   }
+      
+   If (ClipType = "Save") ; SAVE: If we just wanted to save an image, we are done now :)
+   {
+      If FileExist(newFileName)
+         {
+            SplitPath, newFileName, shortName, OutDir
+            Notify("File saved:", shortName, 4)
+            Clipboard := newFileName
+            Sleep 4000 ; Sleep before Exit
+         }
+      else
+      {
+         Traytip, Zizorz:, Error. File %NewFileName% could not be created`nErrorCode: %ErrorCode%, 4 ; Something went wrong in creating file
+         Sleep 10000 ; Sleep before Exit
+      }
+      Gosub, Exit
+   }
+   ; UPLOAD: If ClipType was not FILE (or COPY), then it was ClipType = "Upload"
+   
+   ; --------------
+   ; START OF UPLOAD
+   ; --------------
+   Anonymous_API_Key := "4879223de36cb88"  ; NOTE: Please do not copy Zizorz API key (starting with 4879...) from the source code, get your own at https://api.imgur.com/
+   image_file := newFileName
+      
+   try
+   {
+      image_url := UploadToImgur(image_file, Anonymous_API_Key)
+      
+      If (Notification)
+      {
+         Notify("Uploaded!", (Clipboard := image_url), 4)
+         SoundPlay, data\sounds\drop.wav
+      }
+      else
+         Clipboard := image_url
+      Sleep 4000 ; Time to read notice, before quitting app
+      } catch errMsg {
+          MsgBox, 48, Error, % errMsg
+      }
+           
+      gosub Exit
+}
+
 Sleep 3000
 Gosub, Exit
 Return
 
-NotifyOff: ; Trigger this when starting to drag
-Notify("","",0,"Wait",NotifyID) ; Notification OFF - it's memory requiring, so...
+NotifyOff: ; Triggered when user is starting to drag a box
+Gui, %NotifyID%:Hide
 return
 
-;=== ImageSave (& ImageUpload) =========================================================
+; === SETTINGS ======
 
-ImageSave: 
-Sleep, 100   ; if omitted, GUI sometimes stays in picture
-IfNotExist, %ImgFolder%
-   FileCreateDir, %ImgFolder%
-
-
-; Find an available filename.
-
-countLoop := 1
-loopFileName:
-   countLoopString := countLoop
-      
-      loopStringAddZeroes:
-         if (StrLen(countLoopString) < 4)
-         {
-            countLoopString := "0" countLoopString
-            Goto, loopStringAddZeroes
-         }
-      newFileName := ImgFolder . "\img_" countLoopString ".jpg"
-      IfExist, % newFileName
-      {
-         countLoop++
-         Goto, loopFileName
-      }
-; Loop finished
-
-/*
- * Capture screenshot.
- */
-CaptureScreen(Area, False, newFileName, 100)
-If (ClipType = "Save") ; If we just wanted to save an image, we are done now :)
-   {
-   Slash = \
-   IfExist, %newFileName%
-      {
-         Traytip, Zizorz:, File saved as:`n%newFileName%, 4
-         SplitPath, newFileName,, OutDir
-         ClipBoard := OutDir ; Saves the directory instead, because Word and more programs behave better with this. Besides, the user probably just wants to see the image and choose what $he does with it, instead of opening it.
-         Sleep 4000
-      }
-   else
-      Traytip, Zizorz:, Error. File could not be created, 4 ; Something went wrong in creating file
-   Gosub, Exit
-   }
-; --------------
-; START OF Imgshack UPLOAD, Upload function from AHK forums -> HTTPQuery, @ http://www.autohotkey.com/forum/viewtopic.php?t=33506, modified by author Sumon
-; --------------
-ImageUpload: ; Is not called from what I know, but I'll name it anyway
-   image := newfilename
-   FileGetSize,size,%image%
-   SplitPath,image,OFN
-   FileRead,img,%image%
-   VarSetCapacity(placeholder,size,32)
-   boundary := makeProperBoundary()
-   post:="--" boundary "`ncontent-disposition: form-data; name=""MAX_FILE_SIZE""`n`n"
-      . "1048576`n--" boundary "`ncontent-disposition: form-data; name=""xml""`n`nyes`n--"
-      . boundary "`ncontent-disposition: form-data; name=""fileupload""; filename="""
-      . ofn """`nContent-type: " MimeType(img) "`nContent-Transfer-Encoding: binary`n`n" 
-      . placeholder "`n--" boundary "--"
-   headers:="Content-type: multipart/form-data, boundary=" boundary "`nContent-Length: " strlen(post)
-   DllCall("RtlMoveMemory","uInt",(offset:=&post+strlen(post)-strlen(Boundary)-size-5)
-         ,"uInt",&img,"uInt",size)
-   size := httpQuery(result:="","http://www.imageshack.us/index.php",post,headers)
-   VarSetCapacity(result,-1)
-   ;~ Gui,Add,Edit,w800 h600, % result
-   ;~ Gui,Show
-LinkTextPos := RegExMatch(Result, "<image_link>(.*)</image_link>", LinkText)
-
-LinkText := LinkText1
-; End of "Upload"
-ClipBoard := LinkText
-IfExist, Data\Zizorz_UploadedIMGs.txt
-FileAppend, `n%Linktext%, Data\Zizorz_UploadedIMGs.txt
-; GuiClose:
-; GuiEscape:
-;   ExitApp
-
-; END OF "Include" part
-; END OF UPLOAD
-If (Clipboard)
-   ;~ TrayTip, Zizorz:, DONE! Link is in your clipboard`n%Clipboard%, 4
-   SoundPlay, data\sounds\drop.wav
-else
-   TrayTip, Zizorz:, There was an error in uploading your image. Try again., 4
-Sleep 3000
-GoSub, Exit
-return
-
-; === Settings ======
-
-#Include %A_ScriptDir%\Feedback.ahk ; Feedback, FeedbackSubmit, FeedbackSendEmail, return
+#Include %A_ScriptDir%\lib\Feedback.ahk ; Feedback, FeedbackSubmit, FeedbackSendEmail, return
 
 Settings:
 If WinExist("Zizorz Settings")
 {
    WinActivate, Zizorz Settings ; Just activate it again, no need to redraw
-  return
+   return
 }
+
 RestoreCursors() ; For normal cursor at GUI
-Gui, 5: Default
+
+Gui, Settings: Default
 Gui, Destroy
 Gui, Color, FFffFF
 Gui, Font, s10, Verdana
 Gui, Add, Pic, x0 gGuiDrag, data\img\zizorz_header.jpg
+
 AddGraphicButton("ChangeDir", "data\img\filedir.ico", "x10 w40 h40 gGuiChangeDir")
 StringRight, DisplayDir, ImgFolder, 30
 Gui, Add, Text, x60 yp+10 vImgFolder w250, {... %DisplayDir%}
+
 AddGraphicButton("CreateShortCut", "data\img\shortcut.ico", "x10 w40 h40 gGuiCreateShortcut")
 Gui, Add, Text, x60 yp+10 w250, Create a shortcut && hotkey for Zizorz
 IniRead, Notification, data\ZizorzSettings.ini, Notification, Enabled, 1
-NotificationDisplay := ((Notification = 1)?"enabled":"disabled")
+
+;~ AddGraphicButton("APIKey", "data\img\key.ico", "x10 w40 h40 gGuiAPI") ; Removed in v 1.4
+;~ API_Display := (Imgur_AccountName()) ? ("imgur user: " Imgur_AccountName()) : "[ No imgur API key ]"
+;~ Gui, Add, Text, x60 yp+10 w250, %API_Display% 
+
 AddGraphicButton("Notification", "data\img\notification.ico", "x10 w40 h40 gGuiToggleNotification")
+NotificationDisplay := ((Notification = 1)?"enabled":"disabled")
 Gui, Add, Text, x60 yp+10 w250 vNotificationDisplay, Notification %Notificationdisplay%
+
 AddGraphicButton("Feedback", "data\img\feedback.ico", "x10 w40 h40 gFeedback")
 Gui, Add, Text, x60 yp+10 w250, Feedback && support
-;~ Gui, Add, Button, x200 yp h40, Save && Exit
+
 AddGraphicButton("HelpButton", "data\img\help.ico", "x200 w40 h40 gGuiHelp")
 AddGraphicButton("ExitButton", "data\img\exit.ico", "x245 yp w40 h40 gGuiClose")
 AddGraphicButton("SaveButton", "data\img\save.ico", "x290 yp w40 h40 gGuiSubmit default")
 Gui, -Caption +Border
 Gui, Show,, Zizorz Settings
 return
+
+;~ GuiAPI: ; Removed in v 1.4
+;~ MsgBox, 35, Change imgur account?, Do you want to authenticate with another imgur user?
+;~ IfMsgBox, Yes
+;~ {
+   ;~ FileDelete, data\Zizorz_oAuth.ini
+   ;~ If FileExist(A_WinDir "\Media\Speech Off.wav")
+      ;~ SoundPlay, %A_WinDir%\Media\Speech Off.wav
+   ;~ Sleep 1000
+   ;~ Reload
+;~ }
+;~ return
 
 GuiToggleNotification:
 If (Notification = 1)
@@ -319,7 +286,7 @@ GuiControl,, NotificationDisplay, Notification %NotificationDisplay%
 return
 
 GuiHelp:
-MsgBox, 32, Zizorz help, Zizorz is a tool to create`, save & upload images quickly and intuitively`, making it easier to create & share content with others.`nZizorz (tm) was made by Simon StrÃ¥lberg in 2011 using Autohotkey (http://www.autohotkey.com)`n`nTo capture an area`, hold and drag the left mouse button. To capture a window`, hold the windows (#) key and leftclick. Depending on what modifier you use (you must use one)`, you can achieve one of following three options:`n`n[ + Shift ] Upload to imageshack.us`n[ + Ctrl ] Copy to clipboard`n[ + Alt ] Save as a file in the pre-chosen folder`n`nIn cases 1 & 3`, the link to the URL respectively file folder will be in your clipboard.`n`nZizorz will not run in the background`, but instead exits when finished`, so it doesn't require memory when not used. Therefore`, it is recommended that you launch Zizorz using an applauncher such as Appifyer (tm).
+MsgBox, 32, Zizorz help, Zizorz™ is a tool to create`, save & upload images quickly and intuitively`, making it easier to create & share content with others.`n`nTo capture an area`, hold and drag the left mouse button. To capture a window`, hold the Windows key and leftclick. Depending on what modifier you use (you must use one)`, you can achieve one of following three options:`n`n[ Shift ] Upload to imgur.com`n[ Ctrl ] Copy to clipboard`n[ Alt ] Save as a file in the pre-chosen folder`n[ + Win ] Copy the entire window clicked`n`nIn cases 1 & 3`, the link to the URL respectively file folder will be in your clipboard. In case 4, you need to hold the Windows key and one additional modifier to decide what do do with the caputred window.`n`nZizorz will not run in the background`, but instead exits when finished`, so it doesn't require memory when not used. Therefore`, it is recommended that you launch Zizorz using an applauncher such as Appifyer™.`n`nThe current version is %ScriptVersion%`nZizorz™ was made by Simon Strålberg in 2011 using Autohotkey (http://www.autohotkey.com)
 return
 
 GuiChangeDir:
@@ -333,11 +300,13 @@ return
 GuiCreateShortCut:
 FileCreateShortcut, %A_ScriptDir%\%A_ScriptName%, %A_Desktop%\Zizorz.lnk, %A_ScriptDir%,, Launch Zizorz, %A_ScriptDir%\data\img\Zizorz.ico, Z
 SoundPlay, data\sounds\click.wav
-MsgBox, 64, Shortcut created, Created a shortcut for Zizorz on your desktop.`nAdded the default hotkey Ctrl+Alt+Z to launch Zizorz.`nYou may change the hotkey by editing the shortcut.
+MsgBox, 65, Shortcut created, Created a shortcut for Zizorz™ on your desktop.`nAdded the default hotkey Ctrl+Alt+Z to launch Zizorz.`nYou may change the hotkey by editing the shortcut.`n`nTip: If you use Appifyer™ (made by the same author as Zizorz)`, you can define your own hotkey for any file or app. Do you want to check out Appifyer.com?
+IfMsgBox, OK
+   Run http://www.appifyer.com
 return
 
 GuiClose:
-Gui, 5:Destroy
+Gui, Settings:Destroy
 Hotkey, F1, Off ; Can't reenable Help upon exiting
 Gosub, Exit
 return
@@ -357,7 +326,7 @@ return
 ; Change if you want to have it running constantly
 
 Install:
-Gui, 33:Default
+Gui, Install:Default
 gui, font, s10, Verdana  ; Set 10-point Verdana.
 Gui, Add, Text, vInstallText, This is the first time you run Zizorz! `n`nExtract required data to "/data" directory?
 Gui, Add, Button, x10 w125 h40 gInstallFiles default, Sure!
@@ -368,13 +337,90 @@ Gui, Show,, Extract files?
 WinWaitClose, Extract files?,, 30 ; Wait max 30s
 return
 
+;~ oAuthCheck: ; Not used in v 1.4
+;~ IfNotExist, % IniFile := "data\Zizorz_oAuth.ini"
+   ;~ FileAppend, [Imgur: OAuth Endpoints]`n
+   ;~ ( LTRIM
+      ;~ Request_Token_Endpoint=https://api.imgur.com/oauth2/request_token
+      ;~ Authorize_Endpoint=https://api.imgur.com/oauth2/authorize
+      ;~ Access_Token_Endpoint=https://api.imgur.com/oauth2/access_token
+
+      ;~ [Imgur: OAuth Tokens]
+      ;~ Consumer_Key=b5b38bec220fb96e16fdb7a9e122caa804f625292
+      ;~ Consumer_Secret=6be33de189e20ffd33068d8866b3e728
+      ;~ Access_Token=
+      ;~ Token_Secret=
+
+      ;~ [Script Settings]
+   ;~ ), % IniFile
+
+/*
+2016 imgur API:
+Client ID: 4879223de36cb88
+Client secret: b4e667c9972477a2728fb9610644a28dc0bc0577
+*/
+
+OAuth_ConsumerKey(        IniRead( IniFile, "Imgur: OAuth Tokens", "Consumer_Key"    ) )
+OAuth_ConsumerSecret(     IniRead( IniFile, "Imgur: OAuth Tokens", "Consumer_Secret" ) )
+OAuth_TokenSecret(        IniRead( IniFile, "Imgur: OAuth Tokens", "Token_Secret"    ) )
+OAuth_Token(              IniRead( IniFile, "Imgur: OAuth Tokens", "Access_Token"    ) )
+
+; If there IS an OAuth token already available, use a simple GET function to test it.
+If !OAuth_Token() || !( Account_Name := Imgur_AccountName() )
+{
+   ; Either there is no existing token, or it's invalid. Either way, we have to get a new token.
+   
+   ; Acquire a request token.
+   If !( Request_Token := OAuth_RequestToken( IniRead( IniFile, "Imgur: OAuth Endpoints", "Request_Token_Endpoint" ) ) )
+   {
+      MsgBox, 16, Imgur API: Critical Error, % ""
+      . "For some reason`, a request token could not be obtained. This script will exit."
+      . "`nLast Response: " OAuth_LastResponse()
+      Exitapp
+   }
+   
+   ; Open the authorization page in the user's default browser.
+   Run, % IniRead( IniFile, "Imgur: OAuth Endpoints", "Authorize_Endpoint" ) "?oauth_token=" Request_Token
+   
+   ; Display a custom prompt for the user to copy/paste the verifier code after authorizing the script.
+   Notify("Zizorz > imgur", "Zizorz will use imgur to upload your image.`nPlease authenticate by following the instructions", 8,, "data\img\Zizorz.ico")
+   If !( verifier := OAuth_PromptUserForOOBVerifier() )
+      Exitapp ; user cancelled... we're done
+   
+   ; Acquire an access token
+   Access_Token := OAuth_AccessToken( IniRead( IniFile, "Imgur: OAuth Endpoints", "Access_Token_Endpoint" ), verifier )
+
+   If !( Account_Name := Imgur_AccountName() )
+   {
+      MsgBox, 16, Imgur API: Critical Error, % ""
+      . "There was a problem verifying the access token. This script will exit."
+      . "`nLast Response: " OAuth_LastResponse()
+      Exitapp
+   }
+
+   ; Store the token and secret in the config.ini for future use. NOTE: tokens should be encrypted for storage.
+   IniWrite, % Access_Token, % IniFile, Imgur: OAuth Tokens, Access_Token
+   IniWrite, % OAuth_TokenSecret(), % IniFile, Imgur: OAuth Tokens, Token_Secret
+   
+   If FileExist(A_Windir "\Media\tada.wav")
+	{
+		SoundPlay, %A_WinDir%\Media\tada.wav, wait
+		Sleep 1000
+	}
+   StringUpper, Account_Name, Account_Name, T
+   Notify("Account added", "Welcome, " Account_Name, 4)
+}
+StringUpper, Account_Name, Account_Name, T
+
+return ; Finished with oAuthCheck
+
 InstallFiles:
 GuiControl,, InstallText, Extracting...
 GuiControl, Disable, Sure!
 GuiControl, Disable, No thanks!
 Traytip, Zizorz:, Extracting files..., 3
    FileCreateDir, Data   
-      FileInstall, data\ZizorzSettings.ini, data\ZizorzSettings.ini
+      FileInstall, data\ZizorzSettings_default.ini, data\ZizorzSettings.ini
    FileCreateDir, Data\sounds
       FileInstall, data\sounds\scissors.wav, data\sounds\scissors.wav
       FileInstall, data\sounds\click.wav, data\sounds\click.wav
@@ -383,33 +429,107 @@ Traytip, Zizorz:, Extracting files..., 3
    FileInstall, data\img\Zizorz.ico, data\img\Zizorz.ico
    FileInstall, data\img\exit.ico, data\img\exit.ico
    FileInstall, data\img\filedir.ico, data\img\filedir.ico
+   FileInstall, data\img\key.ico, data\img\key.ico
    FileInstall, data\img\shortcut.ico, data\img\shortcut.ico
    FileInstall, data\img\save.ico, data\img\save.ico
+   FileInstall, data\img\save.ico, data\img\settings.ico
    FileInstall, data\img\help.ico, data\img\help.ico
    FileInstall, data\img\feedback.ico, data\img\feedback.ico
    FileInstall, data\img\notification.ico, data\img\notification.ico
    FileInstall, data\img\zizorz_header.jpg, data\img\zizorz_header.jpg
    
 Traytip, Zizorz:, Done!, 1
-Gui, 33:Submit
+Gui, Install:Submit
 return
 
 Exit:
 RestoreCursors() ; If unexpected exit
-Sleep 1500
+Gdip_Shutdown(pToken)
+Sleep 1000
 ExitApp
 return
+
+
 ;===Functions==========================================================================
-imgurUpload(image) ; Not functioning yet
-{
-	API_key := "75388cba9c4224693dc2a8d7f59e0fb5" ; Key for Zizorz
-	http := ComObjCreate("WinHttp.WinHttpRequest.5.1"), main := "http://api.imgur.com/2/upload?"
-	post := "key=" . API_key . "&image=" . image
-    Clipboard := main . post
-    http.open("POST", main . post, false)
-    http.send()
-    return RegexReplace(http.ResponseText, "\r?\n?")
+
+/* Non-anonymous upload
+Imgur_Upload( image_file ) { ; ---------------------------------------------------------------------
+; Uploads one image to the user's Imgur account and returns the URL of the image.
+   Static EndPoint := "http://api.imgur.com/3/upload.xml"
+   FileGetSize, size, % image_file
+   FileRead, data, % "*c " image_file
+   headers := OAuth_HeaderAuth( EndPoint, "", "POST" )
+   . "`n" . "Content-Length: " size
+   . "`n" . "Content-Type: application/octet-stream"
+   HTTPRequest( EndPoint, data, headers, "Callback: Imgur_Progress" )
+   OAuth_LastResponse( EndPoint ), OAuth_LastResponse( data ), OAuth_LastResponse( headers )
+   StringGetPos, pos, data, <hash>
+   If !( ErrorLevel )
+      Return "http://i.imgur.com/" SubStr( data, pos + 7, Instr( data, "</hash>", 0, pos + 6 ) - pos - 7 ) ".jpg"
+   Else Return "" ; error: see response
+} ; Imgur_Upload( image_file ) ---------------------------------------------------------------------
+*/
+Imgur_Upload( image_file, Anonymous_API_Key, byref output_XML="" ) { ; -----------------------------
+; Uploads one image file to Imgur via the anonymous API and returns the URL to the image.
+; To acquire an anonymous API key, please register at http://imgur.com/register/api_anon.
+; This function was written by [VxE] and relies on the HTTPRequest function, also by [VxE].
+; HTTPRequest can be found at http://www.autohotkey.com/forum/viewtopic.php?t=73040
+   Static Imgur_Upload_Endpoint := "https://api.imgur.com/3/image"
+   FileGetSize, size, % image_file
+   FileRead, output_XML, % "*c " image_file
+   If HTTPRequest( Imgur_Upload_Endpoint, output_XML, Response_Headers := "Authorization: Client-ID " Anonymous_API_Key) ; Option not used "Callback: Progress"
+   && ( pos := InStr( output_XML, "<original>" ) )
+      Return SubStr( output_XML, pos + 10, Instr( output_XML, "</original>", 0, pos ) - pos - 10 )
+   Else Return "" ; error: see response
+} ; Imgur_Upload( image_path, Anonymous_API_Key, byref output_XML="" ) -----------------------------
+
+
+Progress( pct, total ) {
+   If ( pct = "" )
+      Tooltip
+   Else If ( pct < 0 )
+      Tooltip, % "Uploading... " Round( 100 * ( pct + 1 ), 1 ) "%", 0, 0
+   Else If ( 0 <= pct )
+      Tooltip, % "Done!", 0, 0
+   return
 }
+
+Imgur_AccountName() { ; ----------------------------------------------------------------------------
+; Returns the name (url) of the account that has authorized this script.
+   Static EndPoint := "http://api.imgur.com/2/account.xml"
+   headers := OAuth_HeaderAuth( EndPoint, "", "GET" )
+   HTTPRequest( EndPoint, data := "", headers )
+   OAuth_LastResponse( EndPoint ), OAuth_LastResponse( data ), OAuth_LastResponse( headers )
+   StringGetPos, pos, data, <url>
+   If ( ErrorLevel )
+      Return "" ; failure
+   StringTrimLeft, data, data, pos + 5
+   Return SubStr( data, 1, InStr( data, "<" ) - 1 )
+} ; Imgur_AccountName() ----------------------------------------------------------------------------
+
+
+XML_MakePretty( XML, Tab="`t" ) { ; ----------------------------------------------------------------
+; Function by [VxE]. Adds newlines and tabs between XML tags to give human-friendly arrangement to
+; an XML stream. 'Tab' contains the string to use as an indentation unit (it may be more readable to
+; use 2 or 3 spaces instead of a full tab... so it's up to you!).
+   oel := ErrorLevel, PrevCloseTag := 0, tabs := "", tablen := StrLen( tab )
+   StringLen, pos, XML
+   Loop, Parse, XML, <, % "`t`r`n "
+      If ( A_Index = 1 )
+         VarSetCapacity( XML, pos, 0 )
+      Else
+      {
+         StringGetPos, pos, A_LoopField, >
+         StringMid, b, A_LoopField, pos, 1
+         StringLeft, a, A_LoopField, 1
+         If !( OpenTag := a != "/" ) * ( CloseTag := a = "/" || a = "!" || a = "?" || b = "/" )
+            StringTrimRight, tabs, tabs, tablen
+         XML .= ( OpenTag || PrevCloseTag ? tabs : "" ) "<" A_LoopField
+         If !( PrevCloseTag := CloseTag ) * OpenTag
+            tabs := ( tabs = "" ? "`n" : tabs ) tab
+      }
+   Return XML, ErrorLevel := oel
+} ; XML_MakePretty( XML, Tab="`t" ) ----------------------------------------------------------------
 
 RestoreCursors()
 {
@@ -501,294 +621,92 @@ SetSystemCursor( Cursor = "", cx = 0, cy = 0 )
    }   
 }
 
-CaptureScreenLeft(aRect)
-{
-   StringSplit, rt, aRect, `,, %A_Space%%A_Tab%
-   LnL := rt1 ; Since CaptureScreen (for fileupload) used s
-   LnT := rt2
-   LnW := rt3 - rt1
-   LnH := rt4 - rt2
-   LznW := rt5
-   LznH := rt6
-
-   LmDC := DllCall("CreateCompatibleDC", "Uint", 0)
-   LhBM := CreateDIBSection(LmDC, LnW, LnH)
-   LoBM := DllCall("SelectObject", "Uint", LmDC, "Uint", LhBM)
-   LhDC := DllCall("GetDC", "Uint", 0)
-   DllCall("BitBlt", "Uint", LmDC, "int", 0, "int", 0, "int", LnW, "int", LnH, "Uint", LhDC, "int", LnL, "int", LnT, "Uint", 0x40000000 | 0x00CC0020)
-   DllCall("ReleaseDC", "Uint", 0, "Uint", LhDC)
-   DllCall("SelectObject", "Uint", LmDC, "Uint", LoBM)
-   DllCall("DeleteDC", "Uint", LmDC)
-   SetClipboardData(LhBM)
-}
-CaptureScreen(aRect = 0, bCursor = False, sFile = "", nQuality = "")
-{
-   If   !aRect
-   {
-      SysGet, nL, 76
-      SysGet, nT, 77
-      SysGet, nW, 78
-      SysGet, nH, 79
-   }
-   Else If   aRect = 1
-      WinGetPos, nL, nT, nW, nH, A
-   Else If   aRect = 2
-   {
-      WinGet, hWnd, ID, A
-      VarSetCapacity(rt, 16, 0)
-      DllCall("GetClientRect" , "Uint", hWnd, "Uint", &rt)
-      DllCall("ClientToScreen", "Uint", hWnd, "Uint", &rt)
-      nL := NumGet(rt, 0, "int")
-      nT := NumGet(rt, 4, "int")
-      nW := NumGet(rt, 8)
-      nH := NumGet(rt,12)
-   }
-   Else If   aRect = 3
-   {
-      VarSetCapacity(mi, 40, 0)
-      DllCall("GetCursorPos", "int64P", pt)
-      DllCall("GetMonitorInfo", "Uint", DllCall("MonitorFromPoint", "int64", pt, "Uint", 2), "Uint", NumPut(40,mi)-4)
-      nL := NumGet(mi, 4, "int")
-      nT := NumGet(mi, 8, "int")
-      nW := NumGet(mi,12, "int") - nL
-      nH := NumGet(mi,16, "int") - nT
-   }
-   Else
-   {
-      StringSplit, rt, aRect, `,, %A_Space%%A_Tab%
-      nL := rt1
-      nT := rt2
-      nW := rt3 - rt1
-      nH := rt4 - rt2
-      znW := rt5
-      znH := rt6
-   }
-
-   mDC := DllCall("CreateCompatibleDC", "Uint", 0)
-   hBM := CreateDIBSection(mDC, nW, nH)
-   oBM := DllCall("SelectObject", "Uint", mDC, "Uint", hBM)
-   hDC := DllCall("GetDC", "Uint", 0)
-   DllCall("BitBlt", "Uint", mDC, "int", 0, "int", 0, "int", nW, "int", nH, "Uint", hDC, "int", nL, "int", nT, "Uint", 0x40000000 | 0x00CC0020)
-   DllCall("ReleaseDC", "Uint", 0, "Uint", hDC)
-   If   bCursor
-      CaptureCursor(mDC, nL, nT)
-   DllCall("SelectObject", "Uint", mDC, "Uint", oBM)
-   DllCall("DeleteDC", "Uint", mDC)
-   If   znW && znH
-      hBM := Zoomer(hBM, nW, nH, znW, znH)
-   If   sFile = 0
-      SetClipboardData(hBM)
-   Else   Convert(hBM, sFile, nQuality), DllCall("DeleteObject", "Uint", hBM)
-   return
-}
-
-CaptureCursor(hDC, nL, nT)
-{
-   VarSetCapacity(mi, 20, 0)
-   mi := Chr(20)
-   DllCall("GetCursorInfo", "Uint", &mi)
-   bShow   := NumGet(mi, 4)
-   hCursor := NumGet(mi, 8)
-   xCursor := NumGet(mi,12)
-   yCursor := NumGet(mi,16)
-
-   VarSetCapacity(ni, 20, 0)
-   DllCall("GetIconInfo", "Uint", hCursor, "Uint", &ni)
-   xHotspot := NumGet(ni, 4)
-   yHotspot := NumGet(ni, 8)
-   hBMMask  := NumGet(ni,12)
-   hBMColor := NumGet(ni,16)
-
-   If   bShow
-      DllCall("DrawIcon", "Uint", hDC, "int", xCursor - xHotspot - nL, "int", yCursor - yHotspot - nT, "Uint", hCursor)
-   If   hBMMask
-      DllCall("DeleteObject", "Uint", hBMMask)
-   If   hBMColor
-      DllCall("DeleteObject", "Uint", hBMColor)
-}
-
-win_Flash(FlashID="", Color="c0edeb") ; Optionally enter Win ID & color (HEX). Default is active window
+win_Flash(FlashID="", Color="3a90ff") ; Optionally enter Win ID & color (HEX). Default is active window
 {
  If (!FlashID)
   WinGet, FlashID, ID, A
  WinGetPos, X, Y, W, H, ahk_id %FlashID%
- Gui, 15: Default
+ Gui, 15: Default ; Arbitrary number
  Gui, Destroy
  Gui, +AlwaysOnTop -caption +Border +ToolWindow +LastFound
  Gui, Color, %Color%
  WinSet, Transparent, 0
  Gui, Show, x%X% y%Y% w%w% h%h%
- T:=0
- Loop, 25
- {
-  Sleep 15
-  T += 2
-  WinSet, Transparent, %T% 
+ 
+ T := 0  ; We start at 0% opacity, go up to 50% smoothly, then back down
+ 
+ Loop, 25 {
+   Sleep 15
+   T += 2
+   WinSet, Transparent, %T% 
  }
- Loop, 25
- {
-  Sleep 15
-  T -= 2
-  WinSet, Transparent, %T% 
+ 
+ Loop, 25 {
+   Sleep 15
+   T -= 2
+   WinSet, Transparent, %T% 
  }
+ 
  Gui, Destroy
  return
 }
 
-Zoomer(hBM, nW, nH, znW, znH)
+
+DragBox(ByRef OutX1="", ByRef OutY1="", ByRef OutX2="", ByRef OutY2="", Byref OutW="", ByRef OutH="", Color="FFFFFF") ; By nimda, modified by sumon to add return-object and modifier-color-support
 {
-   mDC1 := DllCall("CreateCompatibleDC", "Uint", 0)
-   mDC2 := DllCall("CreateCompatibleDC", "Uint", 0)
-   zhBM := CreateDIBSection(mDC2, znW, znH)
-   oBM1 := DllCall("SelectObject", "Uint", mDC1, "Uint",  hBM)
-   oBM2 := DllCall("SelectObject", "Uint", mDC2, "Uint", zhBM)
-   DllCall("SetStretchBltMode", "Uint", mDC2, "int", 4)
-   DllCall("StretchBlt", "Uint", mDC2, "int", 0, "int", 0, "int", znW, "int", znH, "Uint", mDC1, "int", 0, "int", 0, "int", nW, "int", nH, "Uint", 0x00CC0020)
-   DllCall("SelectObject", "Uint", mDC1, "Uint", oBM1)
-   DllCall("SelectObject", "Uint", mDC2, "Uint", oBM2)
-   DllCall("DeleteDC", "Uint", mDC1)
-   DllCall("DeleteDC", "Uint", mDC2)
-   DllCall("DeleteObject", "Uint", hBM)
-   Return   zhBM
-}
-
-Convert(sFileFr = "", sFileTo = "", nQuality = "")
-{
-   If   sFileTo  =
-      sFileTo := A_ScriptDir . "\screen.bmp"
-   SplitPath, sFileTo, , sDirTo, sExtTo, sNameTo
-
-   If Not   hGdiPlus := DllCall("LoadLibrary", "str", "gdiplus.dll")
-      Return   sFileFr+0 ? SaveHBITMAPToFile(sFileFr, sDirTo . "\" . sNameTo . ".bmp") : ""
-   VarSetCapacity(si, 16, 0), si := Chr(1)
-   DllCall("gdiplus\GdiplusStartup", "UintP", pToken, "Uint", &si, "Uint", 0)
-
-   If   !sFileFr
+   If InStr(OutX1, "Color")
+      Color := SubStr(OutX1, -5, 6) ; Get the last 6 digits of Color, format would then be "Color:#80AAE3" f.ex.
+   CoordMode Mouse
+   MouseGetPos oX, oY
+   Gui New
+   Gui +alwaysontop -Caption +Border +ToolWindow +LastFound
+   
+   Gui, Color, %Color%
+   If (Color = "0000FF") ; Set no color to make the box transparent
+	  WinSet, TransColor, 0000FF 
+   else
+	 WinSet, Transparent, 50 ; Else Add transparency
+   While GetKeyState("LButton", "P")
    {
-      DllCall("OpenClipboard", "Uint", 0)
-      If    DllCall("IsClipboardFormatAvailable", "Uint", 2) && (hBM:=DllCall("GetClipboardData", "Uint", 2))
-      DllCall("gdiplus\GdipCreateBitmapFromHBITMAP", "Uint", hBM, "Uint", 0, "UintP", pImage)
-      DllCall("CloseClipboard")
+	  MouseGetPos cX, cY
+	  H := abs(oY-cY), W := abs(oX-cX)
+	  ,GuiX := oX, GuiY := oY
+	  If ( cY < oY )
+		 GuiY := cY
+	  If ( cX < oX )
+		 GuiX := cX
+      
+      If GetKeyState("LCtrl") AND GetKeyState("LShift") 
+         Color := "ff0000", Hotkey := "CtrlShift" ; Warning: Incorrect
+      else if GetKeyState("LCtrl") AND GetKeyState("LAlt")
+         Color := "ff0000", Hotkey := "CtrlAlt"  ; Warning: Incorrect
+      else if GetKeyState("LShift")
+         Color := "3A90FF", Hotkey := "Shift" ; Light blue
+      else if GetKeyState("LCtrl")
+         Color := "2de712", Hotkey := "Ctrl" ; Green
+      else if GetKeyState("LAlt")
+         Color := "FFCD41", Hotkey := "Alt" ; Yellow
+      else
+         Color := "FFFFFF", Hotkey := ""
+      
+      Gui, Color, %Color%
+      
+	  Gui Show, w%W% h%H% x%GuiX% y%GuiY% NoActivate
    }
-   Else If   sFileFr Is Integer
-      DllCall("gdiplus\GdipCreateBitmapFromHBITMAP", "Uint", sFileFr, "Uint", 0, "UintP", pImage)
-   Else   DllCall("gdiplus\GdipLoadImageFromFile", "Uint", Unicode4Ansi(wFileFr,sFileFr), "UintP", pImage)
+   Gui Cancel
+   OutX1 := oX < cX ? oX : cX
+,	OutY1 := oY < cY ? oY : cY
+,	OutX2 := oX > cX ? oX : cX
+,	OutY2 := oY > cY ? oY : cY
+,	OutW := OutX2 - OutX1
+,	OutH := OutY2 - OutY1
+,   OutHotkey := Hotkey
 
-   DllCall("gdiplus\GdipGetImageEncodersSize", "UintP", nCount, "UintP", nSize)
-   VarSetCapacity(ci,nSize,0)
-   DllCall("gdiplus\GdipGetImageEncoders", "Uint", nCount, "Uint", nSize, "Uint", &ci)
-   Loop, %   nCount
-      If   InStr(Ansi4Unicode(NumGet(ci,76*(A_Index-1)+44)), "." . sExtTo)
-      {
-         pCodec := &ci+76*(A_Index-1)
-         Break
-      }
-   If   InStr(".JPG.JPEG.JPE.JFIF", "." . sExtTo) && nQuality<>"" && pImage && pCodec
-   {
-   DllCall("gdiplus\GdipGetEncoderParameterListSize", "Uint", pImage, "Uint", pCodec, "UintP", nSize)
-   VarSetCapacity(pi,nSize,0)
-   DllCall("gdiplus\GdipGetEncoderParameterList", "Uint", pImage, "Uint", pCodec, "Uint", nSize, "Uint", &pi)
-   Loop, %   NumGet(pi)
-      If   NumGet(pi,28*(A_Index-1)+20)=1 && NumGet(pi,28*(A_Index-1)+24)=6
-      {
-         pParam := &pi+28*(A_Index-1)
-         NumPut(nQuality,NumGet(NumPut(4,NumPut(1,pParam+0)+20)))
-         Break
-      }
-   }
-
-   If   pImage
-      pCodec   ? DllCall("gdiplus\GdipSaveImageToFile", "Uint", pImage, "Uint", Unicode4Ansi(wFileTo,sFileTo), "Uint", pCodec, "Uint", pParam) : DllCall("gdiplus\GdipCreateHBITMAPFromBitmap", "Uint", pImage, "UintP", hBitmap, "Uint", 0) . SetClipboardData(hBitmap), DllCall("gdiplus\GdipDisposeImage", "Uint", pImage)
-
-   DllCall("gdiplus\GdiplusShutdown" , "Uint", pToken)
-   DllCall("FreeLibrary", "Uint", hGdiPlus)
+   obj := {X1: OutX1, X2: OutX2, Y1: OutY1, Y2: OutY2, W: OutW, H: OutH, Hotkey: OutHotkey} ; Optionally return an object
+   return obj
 }
 
-CreateDIBSection(hDC, nW, nH, bpp = 32, ByRef pBits = "")
-{
-   NumPut(VarSetCapacity(bi, 40, 0), bi)
-   NumPut(nW, bi, 4)
-   NumPut(nH, bi, 8)
-   NumPut(bpp, NumPut(1, bi, 12, "UShort"), 0, "Ushort")
-   NumPut(0,  bi,16)
-   Return   DllCall("gdi32\CreateDIBSection", "Uint", hDC, "Uint", &bi, "Uint", 0, "UintP", pBits, "Uint", 0, "Uint", 0)
+IniRead( Filename, Section, Key, Default=" " ) {
+   IniRead, OutputVar, % Filename, % Section, % Key, % Default
+   Return OutputVar
 }
-
-SaveHBITMAPToFile(hBitmap, sFile)
-{
-   DllCall("GetObject", "Uint", hBitmap, "int", VarSetCapacity(oi,84,0), "Uint", &oi)
-   hFile:=   DllCall("CreateFile", "Uint", &sFile, "Uint", 0x40000000, "Uint", 0, "Uint", 0, "Uint", 2, "Uint", 0, "Uint", 0)
-   DllCall("WriteFile", "Uint", hFile, "int64P", 0x4D42|14+40+NumGet(oi,44)<<16, "Uint", 6, "UintP", 0, "Uint", 0)
-   DllCall("WriteFile", "Uint", hFile, "int64P", 54<<32, "Uint", 8, "UintP", 0, "Uint", 0)
-   DllCall("WriteFile", "Uint", hFile, "Uint", &oi+24, "Uint", 40, "UintP", 0, "Uint", 0)
-   DllCall("WriteFile", "Uint", hFile, "Uint", NumGet(oi,20), "Uint", NumGet(oi,44), "UintP", 0, "Uint", 0)
-   DllCall("CloseHandle", "Uint", hFile)
-}
-
-SetClipboardData(hBitmap)
-{
-   DllCall("GetObject", "Uint", hBitmap, "int", VarSetCapacity(oi,84,0), "Uint", &oi)
-   hDIB :=   DllCall("GlobalAlloc", "Uint", 2, "Uint", 40+NumGet(oi,44))
-   pDIB :=   DllCall("GlobalLock", "Uint", hDIB)
-   DllCall("RtlMoveMemory", "Uint", pDIB, "Uint", &oi+24, "Uint", 40)
-   DllCall("RtlMoveMemory", "Uint", pDIB+40, "Uint", NumGet(oi,20), "Uint", NumGet(oi,44))
-   DllCall("GlobalUnlock", "Uint", hDIB)
-   DllCall("DeleteObject", "Uint", hBitmap)
-   DllCall("OpenClipboard", "Uint", 0)
-   DllCall("EmptyClipboard")
-   DllCall("SetClipboardData", "Uint", 8, "Uint", hDIB)
-   DllCall("CloseClipboard")
-}
-
-Unicode4Ansi(ByRef wString, sString)
-{
-   nSize := DllCall("MultiByteToWideChar", "Uint", 0, "Uint", 0, "Uint", &sString, "int", -1, "Uint", 0, "int", 0)
-   VarSetCapacity(wString, nSize * 2)
-   DllCall("MultiByteToWideChar", "Uint", 0, "Uint", 0, "Uint", &sString, "int", -1, "Uint", &wString, "int", nSize)
-   Return   &wString
-}
-
-Ansi4Unicode(pString)
-{
-   nSize := DllCall("WideCharToMultiByte", "Uint", 0, "Uint", 0, "Uint", pString, "int", -1, "Uint", 0, "int",  0, "Uint", 0, "Uint", 0)
-   VarSetCapacity(sString, nSize)
-   DllCall("WideCharToMultiByte", "Uint", 0, "Uint", 0, "Uint", pString, "int", -1, "str", sString, "int", nSize, "Uint", 0, "Uint", 0)
-   Return   sString
-}
-
-/*
-=========== MORE FUNCTIONS
-*/
-
-makeProperBoundary(){
-   Loop,26
-      n .= chr(64+a_index)
-   n .= "0123456789"
-   Loop,% StrLen(A_Now) {
-      Random,rnd,1,% StrLen(n)
-      Random,UL,0,1
-      b .= RegExReplace(SubStr(n,rnd,1),".$","$" (round(UL)? "U":"L") "0")
-   }
-   Return b
-}
-
-MimeType(ByRef Binary) {
-   MimeTypes:="424d image/bmp|4749463 image/gif|ffd8ffe image/jpeg|89504e4 image/png|4657530"
-          . " application/x-shockwave-flash|49492a0 image/tiff"
-   @:="0123456789abcdef"
-   Loop,8
-      hex .= substr(@,(*(a:=&Binary-1+a_index)>>4)+1,1) substr(@,((*a)&15)+1,1)
-   Loop,Parse,MimeTypes,|
-      if ((substr(hex,1,strlen(n:=RegExReplace(A_Loopfield,"\s.*"))))=n)
-         Mime := RegExReplace(A_LoopField,".*?\s")
-   Return (Mime!="") ? Mime : "application/octet-stream"
-}
-; START OF "Include" part (HttpQuery)
-; Requires httpQuery to be in your standard library OR to be included
-; httpQuery-0-3-5.ahk
-
-/*
- *====================================================================================
- *                           END OF FILE
- *====================================================================================
- */
